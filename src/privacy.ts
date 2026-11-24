@@ -50,7 +50,12 @@ export class AuditLog {
 
   write(entry: AuditEntry): void {
     if (!this.file) return;
-    mkdirSync(dirname(this.file), { recursive: true });
-    appendFileSync(this.file, JSON.stringify(entry) + "\n");
+    try {
+      mkdirSync(dirname(this.file), { recursive: true });
+      appendFileSync(this.file, JSON.stringify(entry) + "\n");
+    } catch (err) {
+      // A full disk must not turn a successful answer into an error, but it must be visible.
+      console.error(`audit log write failed: ${(err as Error).message}`);
+    }
   }
 }

@@ -142,3 +142,53 @@ test("get_contact returns a clear error for an unknown id", async () => {
   assert.equal(r.error, true);
   assert.match(r.text, /No contact with id 99999/);
 });
+
+test("SQLite itself refuses tables the text guard missed (comma join after ON)", async () => {
+  const { call } = await connect();
+  const r = await call("run_query", {
+    sql: "SELECT sqlite_master.sql FROM deals JOIN contacts ON contacts.id = deals.contact_id, sqlite_master",
+  });
+  assert.equal(r.error, true);
+  assert.match(r.text, /Not allowed: table sqlite_master/);
+  // the authorizer is cleared afterwards, so the fixed tools keep working
+  assert.equal((await call("describe_schema")).error, false);
+});
+
+test("renaming tricks return NULL for personal columns instead of the data", async () => {
+  const { call } = await connect();
+  const union = (await call("run_query", { sql: "SELECT 1,2,3,4,5,6,7,8 UNION ALL SELECT * FROM contacts", limit: 10 })).json();
+  for (const row of union.rows.slice(1)) {
+    assert.equal(row["6"], null);
+    assert.equal(row["7"], null);
+    assert.ok(row["3"]); // first name is not personal contact data and still comes through
+  }
+  const cte = (await call("run_query", { sql: "WITH x(a,b,c,d,e,f,g,h) AS (SELECT * FROM contacts) SELECT substr(f, 2) AS s, g FROM x" })).json();
+  assert.ok(cte.rows.every((r: { s: unknown; g: unknown }) => r.s === null && r.g === null));
+  const star = (await call("run_query", { sql: "SELECT * FROM contacts" })).json();
+  assert.ok(star.rows.every((r: { email: unknown; phone: unknown }) => r.email === null && r.phone === null));
+});
+
+test("a WHERE clause cannot probe an email that the query never names", async () => {
+  const { call } = await connect();
+  const r = (await call("run_query", {
+    sql: "WITH x(a,b,c,d,e,f) AS (SELECT id, company_id, first_name, last_name, title, email FROM contacts) SELECT a FROM x WHERE f LIKE '%example%'",
+  }));
+  // either refused by the text rule or answered with nothing; never a match on real addresses
+  if (!r.error) assert.equal(r.json().rows.length, 0);
+});
+
+test("with masking off, run_query returns real contact columns", async () => {
+  const { call } = await connect({ maskPii: false });
+  const row = (await call("run_query", { sql: "SELECT email FROM contacts WHERE id = 1" })).json().rows[0];
+  assert.match(row.email, /@.+\.example$/);
+});
+
+test("a failing audit log does not break an answer", async () => {
+  const crm = new Crm(dbPath, { maskPii: true, maxRows: 10 });
+  const server = createServer(crm, new AuditLog("/dev/null/cannot/write.jsonl"), () => DEMO_NOW);
+  const client = new Client({ name: "t", version: "0" });
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(a), client.connect(b)]);
+  const r = (await client.callTool({ name: "pipeline_summary", arguments: {} })) as { isError?: boolean };
+  assert.notEqual(r.isError, true);
+});

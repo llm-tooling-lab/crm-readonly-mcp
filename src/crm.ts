@@ -1,4 +1,4 @@
-import { DatabaseSync } from "node:sqlite";
+import { constants, DatabaseSync } from "node:sqlite";
 import { guardQuery, QueryRejected, withLimit } from "./guard.js";
 import { maskRow } from "./privacy.js";
 
@@ -16,6 +16,9 @@ export interface CrmOptions {
 
 /** Columns holding personal data. While masking is on, run_query may not touch them directly. */
 const PII_COLUMNS = /\b(email|phone)\b/i;
+const PII_COLUMN_NAMES = new Set(["email", "phone"]);
+/** SQL functions run_query may never call, whatever the text guard thinks. */
+const BLOCKED_FUNCTIONS = new Set(["load_extension", "readfile", "writefile", "edit", "fts3_tokenizer"]);
 
 /** Read-only access to the CRM database. Every method returns masked rows unless masking is turned off. */
 export class Crm {
@@ -130,7 +133,43 @@ export class Crm {
       );
     }
     const max = Math.min(limit, this.opts.maxRows);
-    const all = this.rows(withLimit(guarded.sql, max));
+    const allowed = new Set<string>(EXPOSED_TABLES);
+    const denied: string[] = [];
+    // Third layer: SQLite itself reports every table and column the statement touches while it is compiled.
+    // This holds however the SQL is written, so it closes what a text check cannot (comma joins after ON,
+    // unbalanced parentheses, UNION renaming columns, CTE column lists).
+    this.db.setAuthorizer((action, arg1, arg2) => {
+      if (action === constants.SQLITE_SELECT) return constants.SQLITE_OK;
+      if (action === constants.SQLITE_READ) {
+        const table = String(arg1 ?? "").toLowerCase();
+        if (!allowed.has(table)) {
+          denied.push(`table ${table}`);
+          return constants.SQLITE_DENY;
+        }
+        // Personal columns read as NULL in free queries: no rename, function or WHERE clause can reveal them.
+        if (this.opts.maskPii && PII_COLUMN_NAMES.has(String(arg2 ?? "").toLowerCase())) return constants.SQLITE_IGNORE;
+        return constants.SQLITE_OK;
+      }
+      if (action === constants.SQLITE_FUNCTION) {
+        const fn = String(arg2 ?? "").toLowerCase();
+        if (BLOCKED_FUNCTIONS.has(fn)) {
+          denied.push(`function ${fn}`);
+          return constants.SQLITE_DENY;
+        }
+        return constants.SQLITE_OK;
+      }
+      denied.push(`action ${action}`);
+      return constants.SQLITE_DENY;
+    });
+    let all: Row[];
+    try {
+      all = this.rows(withLimit(guarded.sql, max));
+    } catch (err) {
+      if (denied.length) throw new QueryRejected(`Not allowed: ${[...new Set(denied)].join(", ")}`);
+      throw err;
+    } finally {
+      this.db.setAuthorizer(null);
+    }
     return { tables: guarded.tables, rows: all.slice(0, max), truncated: all.length > max };
   }
 }

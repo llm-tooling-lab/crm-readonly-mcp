@@ -21,11 +21,12 @@ All tools are marked read-only (`readOnlyHint`).
 
 ## How it keeps data safe
 
-1. **Read-only connection.** The database is opened in read-only mode. Even a query that got past every other check cannot write.
-2. **Query guard for `run_query`.** One statement only, `SELECT` or `WITH ... SELECT`. No comments, quoted identifiers, comma joins, schema-qualified names or table functions, which are the usual ways to hide a keyword or reach `sqlite_master`. Only the exposed tables can be read. Keywords inside string literals are ignored, so a note that says "please delete" does not trip it.
-3. **Row limits.** Every free query is wrapped as `SELECT * FROM (...) LIMIT n`, and the response says when it was truncated.
-4. **PII masking, on by default.** Email and phone columns are masked (`a***@company.example`, `***42`), and so are email addresses inside free text such as notes. While masking is on, `run_query` refuses to touch email or phone columns directly, because a function like `substr(email, 2)` would rename the column and slip past masking. Search does not match on email either, so the assistant cannot confirm that an address exists.
-5. **Audit log.** One JSON line per call: tool, arguments, row count, time, and the error if it was refused.
+1. **Read-only connection.** The database is opened in read-only mode. No query can write, whatever else happens.
+2. **SQLite authorizer for `run_query`.** While a free query is compiled, SQLite reports every table, column and function it touches, and the server answers for each one. Tables you did not expose (including `sqlite_master`) are refused, every action other than reading is refused, and extension loading is refused. This works on what the query actually does, not on how it is written, so comma joins, unbalanced parentheses or `UNION` tricks do not get around it.
+3. **Personal columns read as NULL in free queries.** With masking on, `email` and `phone` come back as `NULL` from `run_query`, so no rename, function (`substr(email, 2)`), `UNION` or `WHERE` probe can reveal them. The fixed tools return them masked instead (`a***@company.example`, `***42`), and email addresses inside free text such as notes are masked too. Contact search does not match on email, so the assistant cannot confirm that an address exists.
+4. **Text guard in front.** Before SQLite sees it, a free query must be one `SELECT` or `WITH ... SELECT` with balanced parentheses and no comments, quoted identifiers, comma joins after `FROM`, schema-qualified names or table functions. It gives the assistant a clear error early; the authorizer is what enforces.
+5. **Row limits.** Every free query is wrapped as `SELECT * FROM (...) LIMIT n`, and the response says when it was truncated.
+6. **Audit log.** One JSON line per call: tool, arguments, row count, time, and the error if it was refused. A failing log write is reported on stderr and never breaks an answer.
 
 ## Run it
 
@@ -76,7 +77,7 @@ Any MCP client with a JSON config:
 npm test
 ```
 
-Seventeen tests. They cover what the guard accepts and rejects (writes, stacked statements, comments, quoted identifiers, internal tables, table functions, comma joins), that the connection refuses writes even without the guard, that no tool output contains an unmasked email or phone, that renaming a personal column cannot bypass masking, the audit log, row caps, and the numbers returned by the pipeline and stale-deal tools.
+Twenty-four tests. They cover what the text guard accepts and rejects; that the connection refuses writes even without the guard; that SQLite refuses a hidden table the text guard missed; that `UNION`, CTE column lists and functions return `NULL` for personal columns; that no tool output contains an unmasked email or phone; the audit log, including a log that cannot be written; row caps; and the numbers returned by the pipeline and stale-deal tools. Each protection was also switched off on purpose to confirm that a test fails without it.
 
 ## Using it with your own CRM
 
@@ -84,8 +85,8 @@ The tools are written for the demo schema (`companies`, `contacts`, `deals`, `ac
 
 ## Limits
 
-- The guard checks SQL text. It is a strong filter, not a parser, and the read-only connection is the layer that actually guarantees nothing is written. For the strictest setup, set `ALLOW_RAW_QUERY=false`.
-- Masking of free text catches email addresses written as text. A query that transforms a notes column (for example replacing `@`) can still reveal an address written inside a note. If notes may contain sensitive data, turn off `run_query` or expose a pre-masked view.
+- Personal data is protected by column name (`email`, `phone`). If your schema stores personal data under other names, add them to `PII_COLUMN_NAMES` in `src/crm.ts`.
+- Free text is masked only for email addresses written as text. A free query that transforms a notes column (for example replacing `@`) can still reveal an address written inside a note. If notes may contain sensitive data, set `ALLOW_RAW_QUERY=false` or expose a pre-masked view.
 - SQLite queries run synchronously without a timeout. Row limits bound the output, not the work, so a very heavy join can still be slow on a large database.
 - Single user, local stdio server with no authentication. Do not expose it over a network as is.
 

@@ -72,6 +72,14 @@ export function guardQuery(input: string, allowedTables: readonly string[]): Gua
   if (analysis.includes(";")) throw new QueryRejected("Only one statement is allowed");
   if (!/^(select|with)\b/i.test(analysis)) throw new QueryRejected("Only SELECT queries are allowed");
 
+  // The query is later wrapped as SELECT * FROM (...) LIMIT n; an unbalanced parenthesis would escape that wrapper.
+  let depth = 0;
+  for (const ch of analysis) {
+    if (ch === "(") depth++;
+    else if (ch === ")" && --depth < 0) break;
+  }
+  if (depth !== 0) throw new QueryRejected("Unbalanced parentheses");
+
   const forbidden = analysis.match(FORBIDDEN);
   if (forbidden) throw new QueryRejected(`Keyword not allowed: ${forbidden[1].toUpperCase()}`);
 
@@ -80,7 +88,7 @@ export function guardQuery(input: string, allowedTables: readonly string[]): Gua
   }
 
   const cte = new Set<string>();
-  for (const m of analysis.matchAll(/(?:\bwith\s+(?:recursive\s+)?|,\s*)([a-z_]\w*)\s+as\s*\(/gi)) {
+  for (const m of analysis.matchAll(/(?:\bwith\s+(?:recursive\s+)?|,\s*)([a-z_]\w*)\s*(?:\([^()]*\))?\s+as\s*\(/gi)) {
     cte.add(m[1].toLowerCase());
   }
 

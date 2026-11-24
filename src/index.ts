@@ -13,7 +13,10 @@ if (!existsSync(dbPath)) {
 
 const crm = new Crm(dbPath, {
   maskPii: process.env.MASK_PII !== "false",
-  maxRows: Math.min(Number(process.env.MAX_ROWS ?? 200), 1000),
+  maxRows: (() => {
+    const n = Number(process.env.MAX_ROWS ?? 200);
+    return Number.isInteger(n) && n > 0 ? Math.min(n, 1000) : 200;
+  })(),
   allowRawQuery: process.env.ALLOW_RAW_QUERY !== "false",
 });
 const audit = new AuditLog(process.env.AUDIT_FILE ?? "data/audit.jsonl");

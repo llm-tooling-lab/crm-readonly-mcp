@@ -48,6 +48,16 @@ test("only exposed tables can be read", () => {
   rejected("SELECT * FROM deals JOIN users ON 1 = 1", /Table not available: users/);
 });
 
+test("unbalanced parentheses cannot escape the LIMIT wrapper", () => {
+  rejected("SELECT 1 FROM deals) , sqlite_master WHERE (1", /Unbalanced/);
+  rejected("SELECT (1 FROM deals", /Unbalanced/);
+  assert.deepEqual(ok("SELECT ')' AS p FROM deals").tables, ["deals"]); // a parenthesis inside a string is fine
+});
+
+test("CTEs with a column list are recognised", () => {
+  assert.deepEqual(ok("WITH x(a, b) AS (SELECT id, stage FROM deals) SELECT b FROM x").tables, ["deals"]);
+});
+
 test("withLimit caps rows and fetches one extra to detect truncation", () => {
   assert.equal(withLimit("SELECT * FROM deals", 10), "SELECT * FROM (SELECT * FROM deals) LIMIT 11");
   assert.equal(withLimit("SELECT 1", 0), "SELECT * FROM (SELECT 1) LIMIT 2");
